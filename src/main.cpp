@@ -226,6 +226,7 @@ volatile int selIdx = -1;
 #define BLE_CHUNK 20      // ส่งทีละ 20 ไบต์ ให้เข้ากับโมดูล BLE-UART ทั่วไป
 
 volatile int currentRPM = 0;
+volatile int currentShift = 0; // สถานะเซนเซอร์เกียร์ (0x2003): 0 = ปกติ (แดง), 1 = กดเกียร์ (เขียว)
 volatile uint32_t lastRpmMs = 0;
 static uint32_t lastRpmReqMs = 0;
 
@@ -271,6 +272,8 @@ static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf;
 
 lv_obj_t *label_rpm;
+lv_obj_t *shift_dot;
+lv_obj_t *label_shift;
 lv_obj_t *label_status;
 lv_obj_t *label_msg;
 lv_obj_t *btn_load;
@@ -379,7 +382,8 @@ static bool sendFrame(const uint8_t *b, size_t n)
 
 static void sendRpmReq()
 {
-    uint8_t b[6] = {MB_ID, 0x03, ADDR_RPM >> 8, ADDR_RPM & 0xFF, 0x00, 0x01};
+    // ขอ 2 รีจิสเตอร์ (0x2002 = RPM, 0x2003 = sensorState)
+    uint8_t b[6] = {MB_ID, 0x03, ADDR_RPM >> 8, ADDR_RPM & 0xFF, 0x00, 0x02};
     sendFrame(b, 6);
     lastRpmReqMs = millis();
 }
@@ -442,9 +446,13 @@ static void handleFrame(const char *s, size_t n)
         if (nb != (size_t)(6 + bc))
             return;
 
-        if (addr == ADDR_RPM && bc == 2)
+        if (addr == ADDR_RPM && (bc == 2 || bc == 4))
         {
             currentRPM = ((int)b[5] << 8) | b[6];
+            if (bc == 4)
+            {
+                currentShift = ((int)b[7] << 8) | b[8];
+            }
             lastRpmMs = millis();
         }
         else if (addr == ADDR_SENS && bc == 2)
@@ -637,33 +645,50 @@ void build_ui()
     label_rpm = lv_label_create(left_panel);
     lv_obj_set_style_text_color(label_rpm, lv_color_hex(0xFFDD00), 0);
     lv_obj_set_style_text_font(label_rpm, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_align(label_rpm, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(label_rpm, "RPM\n0");
-    lv_obj_align(label_rpm, LV_ALIGN_TOP_MID, 0, 5);
+    lv_obj_align(label_rpm, LV_ALIGN_TOP_MID, 0, 0);
+
+    // --- ไฟสถานะการกดเกียร์ (SHIFT) ล่าง RPM: แดง = ยังไม่กด, เขียว = กดเกียร์ ---
+    shift_dot = lv_obj_create(left_panel);
+    lv_obj_remove_style_all(shift_dot);
+    lv_obj_set_size(shift_dot, 22, 22);
+    lv_obj_set_style_radius(shift_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(shift_dot, lv_color_hex(0xDD2222), 0);
+    lv_obj_set_style_bg_opa(shift_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(shift_dot, 2, 0);
+    lv_obj_set_style_border_color(shift_dot, lv_color_hex(0x666666), 0);
+    lv_obj_align(shift_dot, LV_ALIGN_TOP_LEFT, 45, 102);
+
+    label_shift = lv_label_create(left_panel);
+    lv_label_set_text(label_shift, "SHIFT: OFF");
+    lv_obj_set_style_text_color(label_shift, lv_color_hex(0xFF6666), 0);
+    lv_obj_align(label_shift, LV_ALIGN_TOP_LEFT, 76, 105);
 
     label_status = lv_label_create(left_panel);
     lv_obj_set_style_text_font(label_status, &lv_font_montserrat_28, 0);
     lv_label_set_long_mode(label_status, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(label_status, 190);
     lv_obj_set_style_text_align(label_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label_status, LV_ALIGN_TOP_MID, 0, 110);
+    lv_obj_align(label_status, LV_ALIGN_TOP_MID, 0, 130);
     setStatus("Not connected", 0xFFAA00);
 
     label_msg = lv_label_create(left_panel);
     lv_label_set_long_mode(label_msg, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(label_msg, 190);
     lv_obj_set_style_text_align(label_msg, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label_msg, LV_ALIGN_TOP_MID, 0, 178);
+    lv_obj_align(label_msg, LV_ALIGN_TOP_MID, 0, 192);
     setMsg("Press SCAN BT", 0xAAAAAA);
 
     // --- ช่องปรับความไวเซนเซอร์ (Sens %) ---
     lv_obj_t *lbl_sens = lv_label_create(left_panel);
     lv_label_set_text(lbl_sens, "Sens (%)");
     lv_obj_set_style_text_color(lbl_sens, lv_color_white(), 0);
-    lv_obj_align(lbl_sens, LV_ALIGN_TOP_LEFT, 10, 226);
+    lv_obj_align(lbl_sens, LV_ALIGN_TOP_LEFT, 10, 232);
 
     ta_sens = lv_textarea_create(left_panel);
     lv_obj_set_size(ta_sens, 95, 42);
-    lv_obj_align(ta_sens, LV_ALIGN_TOP_RIGHT, -6, 212);
+    lv_obj_align(ta_sens, LV_ALIGN_TOP_RIGHT, -6, 218);
     lv_textarea_set_one_line(ta_sens, true);
     lv_textarea_set_accepted_chars(ta_sens, "0123456789");
     lv_textarea_set_max_length(ta_sens, 3);
@@ -1148,6 +1173,7 @@ void loop()
         {
             op = OP_IDLE;
             currentRPM = 0;
+            currentShift = 0;
             if (!scanning && !doConnect)
             {
                 setStatus("Not connected", 0xFFAA00);
@@ -1166,13 +1192,23 @@ void loop()
         sendRpmReq();
     }
 
-    // ---- แสดง rpm ----
+    // ---- แสดง rpm และสถานะการกดเกียร์ (SHIFT) ----
     static int lastShownRPM = -1;
     int rpmNow = currentRPM;
     if (rpmNow != lastShownRPM)
     {
         lv_label_set_text_fmt(label_rpm, "RPM\n%d", rpmNow);
         lastShownRPM = rpmNow;
+    }
+
+    static int lastShownShift = -1;
+    int shiftNow = currentShift ? 1 : 0;
+    if (shiftNow != lastShownShift)
+    {
+        lv_obj_set_style_bg_color(shift_dot, lv_color_hex(shiftNow ? 0x00FF00 : 0xDD2222), 0);
+        lv_label_set_text(label_shift, shiftNow ? "SHIFT: ON" : "SHIFT: OFF");
+        lv_obj_set_style_text_color(label_shift, lv_color_hex(shiftNow ? 0x00FF00 : 0xFF6666), 0);
+        lastShownShift = shiftNow;
     }
 
     // ---- ปุ่ม LOAD / SAVE ----
