@@ -213,11 +213,14 @@ volatile int selIdx = -1;
 #define BINS 16
 #define MB_ID 0x01
 #define ADDR_RPM 0x2002
+#define ADDR_SENS 0x2004
 #define ADDR_DEG 0x4000
 #define ADDR_PLS 0x5000
 #define DEG_MAX_X10 1000 // องศา 0-100
-#define PLS_MIN 1        // พัลส์ 1-20
-#define PLS_MAX 20
+#define PLS_MIN 0        // เวลาหน่วง 0-200 ms
+#define PLS_MAX 200
+#define SENS_MIN 0       // ความไวเซนเซอร์ 0-100%
+#define SENS_MAX 100
 #define OP_TIMEOUT_MS 3000
 #define RPM_RETRY_MS 1000 // ไม่มี rpm เข้ามานานเกินนี้ ส่งคำขอใหม่
 #define BLE_CHUNK 20      // ส่งทีละ 20 ไบต์ ให้เข้ากับโมดูล BLE-UART ทั่วไป
@@ -229,23 +232,29 @@ static uint32_t lastRpmReqMs = 0;
 // ข้อมูลที่ callback แกะได้ (loop เป็นคนเอาไปใช้เมื่อ flag ขึ้น)
 static int rxDeg[BINS];
 static int rxPls[BINS];
+static int rxSens = 50;
 volatile bool evDegRead = false;
 volatile bool evPlsRead = false;
+volatile bool evSensRead = false;
 volatile bool evDegAck = false;
 volatile bool evPlsAck = false;
+volatile bool evSensAck = false;
 
 enum Op
 {
     OP_IDLE,
     OP_LOAD_DEG,
     OP_LOAD_PLS,
+    OP_LOAD_SENS,
     OP_SAVE_DEG,
-    OP_SAVE_PLS
+    OP_SAVE_PLS,
+    OP_SAVE_SENS
 };
 static Op op = OP_IDLE;
 static uint32_t opStartMs = 0;
 static int saveDeg[BINS];
 static int savePls[BINS];
+static int saveSens = 50;
 
 volatile bool uiLoadReq = false;
 volatile bool uiSaveReq = false;
@@ -272,6 +281,7 @@ lv_obj_t *dev_list;
 lv_obj_t *right_panel;
 lv_obj_t *ta_deg[BINS];
 lv_obj_t *ta_pls[BINS];
+lv_obj_t *ta_sens;
 lv_obj_t *kb;
 
 #define KB_HEIGHT 200
@@ -380,20 +390,22 @@ static void sendRead(uint16_t addr, uint8_t qty)
     sendFrame(b, 6);
 }
 
-static void sendWrite(uint16_t addr, const int *v)
+static void sendWrite(uint16_t addr, const int *v, uint8_t qty = BINS)
 {
-    uint8_t b[5 + BINS * 2];
+    uint8_t b[7 + BINS * 2];
     b[0] = MB_ID;
     b[1] = 0x10;
     b[2] = addr >> 8;
     b[3] = addr & 0xFF;
-    b[4] = BINS * 2;
-    for (int i = 0; i < BINS; i++)
+    b[4] = 0x00;
+    b[5] = qty;
+    b[6] = qty * 2;
+    for (int i = 0; i < qty; i++)
     {
-        b[5 + i * 2] = (uint8_t)(v[i] >> 8);
-        b[6 + i * 2] = (uint8_t)(v[i] & 0xFF);
+        b[7 + i * 2] = (uint8_t)(v[i] >> 8);
+        b[8 + i * 2] = (uint8_t)(v[i] & 0xFF);
     }
-    sendFrame(b, sizeof(b));
+    sendFrame(b, 7 + qty * 2);
 }
 
 // s = ตัวอักษร hex หลัง ':' ก่อน CRLF
@@ -435,6 +447,11 @@ static void handleFrame(const char *s, size_t n)
             currentRPM = ((int)b[5] << 8) | b[6];
             lastRpmMs = millis();
         }
+        else if (addr == ADDR_SENS && bc == 2)
+        {
+            rxSens = ((int)b[5] << 8) | b[6];
+            evSensRead = true;
+        }
         else if ((addr == ADDR_DEG || addr == ADDR_PLS) && bc == BINS * 2)
         {
             int *dst = (addr == ADDR_DEG) ? rxDeg : rxPls;
@@ -450,12 +467,14 @@ static void handleFrame(const char *s, size_t n)
     }
     else if (b[1] == 0x10)
     { // id func addrH addrL qtyH qtyL lrc
-        if (nb == 7 && b[4] == 0x00 && b[5] == BINS)
+        if (nb == 7 && b[4] == 0x00)
         {
-            if (addr == ADDR_DEG)
+            if (addr == ADDR_DEG && b[5] == BINS)
                 evDegAck = true;
-            else if (addr == ADDR_PLS)
+            else if (addr == ADDR_PLS && b[5] == BINS)
                 evPlsAck = true;
+            else if (addr == ADDR_SENS && b[5] == 1)
+                evSensAck = true;
         }
     }
 }
@@ -486,10 +505,13 @@ static void ta_event_cb(lv_event_t *e)
         lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(kb);
 
-        // ย่นตารางไม่ให้คีย์บอร์ดทับ แล้วเลื่อนช่องที่แก้ให้อยู่ในมุมมอง
-        lv_obj_set_height(right_panel, screenHeight - KB_HEIGHT - 10);
-        lv_obj_update_layout(right_panel);
-        lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+        if (ta != ta_sens)
+        {
+            // ย่นตารางไม่ให้คีย์บอร์ดทับ แล้วเลื่อนช่องที่แก้ให้อยู่ในมุมมอง
+            lv_obj_set_height(right_panel, screenHeight - KB_HEIGHT - 10);
+            lv_obj_update_layout(right_panel);
+            lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+        }
     }
     else if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
     {
@@ -539,10 +561,32 @@ static void fillPlsUI()
     }
 }
 
+static void fillSensUI()
+{
+    char t[12];
+    snprintf(t, sizeof(t), "%d", rxSens);
+    lv_textarea_set_text(ta_sens, t);
+}
+
 // อ่านค่าจากช่องกรอก ตรวจช่วง; คืน false พร้อมข้อความ ถ้ามีช่องผิด
 static bool collectSave()
 {
     char m[48];
+
+    const char *ss = lv_textarea_get_text(ta_sens);
+    if (ss[0] == 0)
+    {
+        setMsg("Sens % is empty");
+        return false;
+    }
+    int s = atoi(ss);
+    if (s < SENS_MIN || s > SENS_MAX)
+    {
+        snprintf(m, sizeof(m), "Sens: %d-%d%%", SENS_MIN, SENS_MAX);
+        setMsg(m);
+        return false;
+    }
+    saveSens = s;
 
     for (int i = 0; i < BINS; i++)
     {
@@ -567,7 +611,7 @@ static bool collectSave()
         }
         if (p < PLS_MIN || p > PLS_MAX)
         {
-            snprintf(m, sizeof(m), "Row %d: pulse %d-%d", i + 1, PLS_MIN, PLS_MAX);
+            snprintf(m, sizeof(m), "Row %d: time %d-%d ms", i + 1, PLS_MIN, PLS_MAX);
             setMsg(m);
             return false;
         }
@@ -601,34 +645,51 @@ void build_ui()
     lv_label_set_long_mode(label_status, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(label_status, 190);
     lv_obj_set_style_text_align(label_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label_status, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_align(label_status, LV_ALIGN_TOP_MID, 0, 110);
     setStatus("Not connected", 0xFFAA00);
 
     label_msg = lv_label_create(left_panel);
     lv_label_set_long_mode(label_msg, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(label_msg, 190);
     lv_obj_set_style_text_align(label_msg, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label_msg, LV_ALIGN_TOP_MID, 0, 195);
+    lv_obj_align(label_msg, LV_ALIGN_TOP_MID, 0, 178);
     setMsg("Press SCAN BT", 0xAAAAAA);
 
+    // --- ช่องปรับความไวเซนเซอร์ (Sens %) ---
+    lv_obj_t *lbl_sens = lv_label_create(left_panel);
+    lv_label_set_text(lbl_sens, "Sens (%)");
+    lv_obj_set_style_text_color(lbl_sens, lv_color_white(), 0);
+    lv_obj_align(lbl_sens, LV_ALIGN_TOP_LEFT, 10, 226);
+
+    ta_sens = lv_textarea_create(left_panel);
+    lv_obj_set_size(ta_sens, 95, 42);
+    lv_obj_align(ta_sens, LV_ALIGN_TOP_RIGHT, -6, 212);
+    lv_textarea_set_one_line(ta_sens, true);
+    lv_textarea_set_accepted_chars(ta_sens, "0123456789");
+    lv_textarea_set_max_length(ta_sens, 3);
+    lv_textarea_set_placeholder_text(ta_sens, "0-100");
+    lv_textarea_set_text(ta_sens, "50");
+    lv_obj_set_style_text_color(ta_sens, lv_color_black(), 0);
+    lv_obj_add_event_cb(ta_sens, ta_event_cb, LV_EVENT_ALL, NULL);
+
     btn_scan = lv_btn_create(left_panel);
-    lv_obj_set_size(btn_scan, 190, 56);
-    lv_obj_align(btn_scan, LV_ALIGN_BOTTOM_MID, 0, -136);
+    lv_obj_set_size(btn_scan, 190, 50);
+    lv_obj_align(btn_scan, LV_ALIGN_BOTTOM_MID, 0, -118);
     lv_obj_add_event_cb(btn_scan, btn_scan_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl_scan = lv_label_create(btn_scan);
     lv_label_set_text(lbl_scan, "SCAN BT");
     lv_obj_center(lbl_scan);
 
     btn_load = lv_btn_create(left_panel);
-    lv_obj_set_size(btn_load, 190, 56);
-    lv_obj_align(btn_load, LV_ALIGN_BOTTOM_MID, 0, -68);
+    lv_obj_set_size(btn_load, 190, 50);
+    lv_obj_align(btn_load, LV_ALIGN_BOTTOM_MID, 0, -59);
     lv_obj_add_event_cb(btn_load, btn_load_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl_load = lv_label_create(btn_load);
     lv_label_set_text(lbl_load, "LOAD TUNE");
     lv_obj_center(lbl_load);
 
     btn_save = lv_btn_create(left_panel);
-    lv_obj_set_size(btn_save, 190, 56);
+    lv_obj_set_size(btn_save, 190, 50);
     lv_obj_set_style_bg_color(btn_save, lv_color_hex(0xCC0000), 0);
     lv_obj_align(btn_save, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_event_cb(btn_save, btn_save_event_cb, LV_EVENT_CLICKED, NULL);
@@ -656,8 +717,8 @@ void build_ui()
         lv_label_set_text(h2, "Degree");
         lv_obj_align(h2, LV_ALIGN_TOP_LEFT, x0 + 90, 4);
         lv_obj_t *h3 = lv_label_create(right_panel);
-        lv_label_set_text(h3, "Pulse");
-        lv_obj_align(h3, LV_ALIGN_TOP_LEFT, x0 + 195, 4);
+        lv_label_set_text(h3, "ms");
+        lv_obj_align(h3, LV_ALIGN_TOP_LEFT, x0 + 200, 4);
     }
 
     for (int i = 0; i < BINS; i++)
@@ -686,7 +747,7 @@ void build_ui()
         lv_obj_align(ta_pls[i], LV_ALIGN_TOP_LEFT, x0 + 180, y);
         lv_textarea_set_one_line(ta_pls[i], true);
         lv_textarea_set_accepted_chars(ta_pls[i], "0123456789");
-        lv_textarea_set_max_length(ta_pls[i], 2);
+        lv_textarea_set_max_length(ta_pls[i], 3);
         lv_textarea_set_placeholder_text(ta_pls[i], "-");
         lv_obj_set_style_text_color(ta_pls[i], lv_color_black(), 0);
         lv_obj_add_event_cb(ta_pls[i], ta_event_cb, LV_EVENT_ALL, NULL);
@@ -1167,6 +1228,17 @@ void loop()
         if (op == OP_LOAD_PLS)
         {
             fillPlsUI();
+            op = OP_LOAD_SENS;
+            opStartMs = now;
+            sendRead(ADDR_SENS, 1);
+        }
+    }
+    if (evSensRead)
+    {
+        evSensRead = false;
+        if (op == OP_LOAD_SENS)
+        {
+            fillSensUI();
             op = OP_IDLE;
             setStatus("Loaded", 0x00FF00);
         }
@@ -1178,13 +1250,23 @@ void loop()
         {
             op = OP_SAVE_PLS;
             opStartMs = now;
-            sendWrite(ADDR_PLS, savePls);
+            sendWrite(ADDR_PLS, savePls, BINS);
         }
     }
     if (evPlsAck)
     {
         evPlsAck = false;
         if (op == OP_SAVE_PLS)
+        {
+            op = OP_SAVE_SENS;
+            opStartMs = now;
+            sendWrite(ADDR_SENS, &saveSens, 1);
+        }
+    }
+    if (evSensAck)
+    {
+        evSensAck = false;
+        if (op == OP_SAVE_SENS)
         {
             op = OP_IDLE;
             setStatus("Saved", 0x00FF00);
